@@ -1,66 +1,77 @@
-import com.azure.storage.blob.models.BlobStorageException
-import com.azure.storage.blob.{BlobServiceClient, BlobServiceClientBuilder}
-import com.azure.storage.blob.models.BlobErrorCode
-import com.azure.storage.blob.models.BlobItem
-
 import org.apache.spark.sql._
-import org.apache.spark.sql.expressions.UserDefinedFunction
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.{DoubleType, IntegerType, Metadata, StringType, StructField, StructType, TimestampType}
+import org.apache.spark.sql.types.{DoubleType, IntegerType, StringType, StructField, TimestampType}
 
 object SparkTransformation {
 
   def main(args: Array[String]): Unit = {
 
-    val sasToken = "?sv=2019-10-10&ss=b&srt=sco&sp=rwdlacx&se=2020-06-06T23:24:06Z&st=2020-06-06T15:24:06Z&spr=https,http&sig=bVJZQ2jh077u2MasyqAqwsJ3R1zYo2qDyrEhJ4a5Nw4%3D"
-    val serviceClient = new BlobServiceClientBuilder()
-      .endpoint("https://tqdkhoaexcercise1.blob.core.windows.net")
-      .sasToken(sasToken)
-      .buildClient()
+    val sourceContainer = "level2"
+    val storageAccountName = "<storage_account_name>"
 
-    /**
-     * Create the Spark Context
-     */
-    val sc = SparkSession.builder()
+    val sasToken = "<sas_token_string>"
+
+    val level2Storage = new MyStorageAccount(sourceContainer, storageAccountName)
+    var mountPoint = level2Storage.getMountPoint("level2")
+    var url = level2Storage.getUrl("level2")
+    var config = level2Storage.getConfiguration()
+    level2Storage.mountBlobStorageContainerToDBFS(url, mountPoint, config, sasToken)
+
+    val spark = SparkSession.builder()
       .appName("Spark Transforamtion")
       .config("spark.master", "local")
       .getOrCreate()
 
-    /**
-     * Read the expertSchema
-     */
-    val expectedSchema = StructType(Array(
-      StructField("registration_dttm", TimestampType, false),
-      StructField("id", IntegerType, false),
-      StructField("first_name", StringType, false),
-      StructField("last_name", StringType, false),
-      StructField("email", StringType, true),
-      StructField("gender", StringType, false),
-      StructField("ip_address", StringType, false),
-      StructField("cc", StringType, true),
-      StructField("country", StringType, true),
-      StructField("birthdate", StringType, true),
-      StructField("salary", DoubleType, false),
-      StructField("title", StringType, true),
-      StructField("comments", StringType, true),
-    ))
+    //Only be used for access Blob Storage directly
+//    spark.sparkContext.hadoopConfiguration.set(
+//      "fs.azure", "org.apache.hadoop.fs.azure.NativeAzureFileSystem")
+//    spark.sparkContext.hadoopConfiguration.set(
+//      s"fs.azure.sas.${sourceContainer}.${storageAccountName}.blob.core.windows.net",
+//      sasToken
+//    )
 
-    try {
-      val containerClient = serviceClient.getBlobContainerClient("level2")
-//      containerClient.listBlobs().stream.forEach(blob => println(s"File names:${blob.getName}"))
-      containerClient.listBlobs().stream.forEach(
-        blob => if(blob.getName.contains("userdata1.parquet")){
-          println(s"Reading file ${blob.getName}")
-          val parquetFileDF = sc.read.parquet(blob.getName)
-          parquetFileDF.createOrReplaceTempView("parquetFile")
-          val firstNameDF = sc.sql("SELECT first_name FROM parquetFile")
-          firstNameDF.show()
-      })
+    val df = spark.read.parquet(mountPoint)
 
-    } catch {
-      case ex: BlobStorageException => if (!ex.getErrorCode.equals(BlobErrorCode.CONTAINER_ALREADY_EXISTS)) throw ex
+    if(df.schema.contains(StructField("registration_dttm",TimestampType,true))
+      && df.schema.contains(StructField("id",IntegerType,true))
+      && df.schema.contains(StructField("first_name",StringType,true))
+      && df.schema.contains(StructField("last_name",StringType,true))
+      && df.schema.contains(StructField("email",StringType,true))
+      && df.schema.contains(StructField("gender",StringType,true))
+      && df.schema.contains(StructField("cc",StringType,true))
+      && df.schema.contains(StructField("country",StringType,true))
+      && df.schema.contains(StructField("birthdate",StringType,true))
+      && df.schema.contains(StructField("salary",DoubleType,true))
+      && df.schema.contains(StructField("title",StringType,true))
+      && df.schema.contains(StructField("comments",StringType,true))){
+      println("Schema is valid")
+    } else{
+      println("Schema is invalid")
     }
 
-    sc.stop()
+    // in below solution, the column name in the schema is the same, just change to have the alias
+//    val tag = "this column has been modified"
+//    val metadata = new sql.types.MetadataBuilder().putString("tag", tag).build()
+//    val newColumn = df.col(old_colname).as(new_colname, metadata)
+//    val parq_rn_col_DF = df.withColumn(old_colname, newColumn)
+
+    val renamedDF = df.withColumnRenamed("cc", "cc_mod")
+    val distinctDF = renamedDF.distinct()
+
+    val destinationContainer = "level3"
+    val level3Storage = new MyStorageAccount(destinationContainer, storageAccountName)
+    mountPoint = level3Storage.getMountPoint("level3")
+    url = level3Storage.getUrl("level3")
+    config = level3Storage.getConfiguration()
+    level3Storage.mountBlobStorageContainerToDBFS(url, mountPoint, config, sasToken)
+
+    println(s"Destination Dir ${destinationContainer}")
+    distinctDF
+      .coalesce(1)
+      .write
+      .mode("overwrite")
+      .format("parquet")
+      .save(mountPoint)
+
+    spark.stop()
   }
 }
